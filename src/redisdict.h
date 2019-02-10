@@ -1,3 +1,4 @@
+#include <string.h>
 #include "../lib/redismodule.h"
 
 #define OK REDISMODULE_OK
