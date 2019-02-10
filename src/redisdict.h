@@ -10,10 +10,13 @@
 #define SD_PREFIX "{"
 #define SD_PREFIX_LEN strlen(SD_PREFIX)
 
-#define SD_HASHTABLE_APPEND "}_sd1"
+#define SD_SUFFIX "}"
+#define SD_SUFFIX_LEN strlen(SD_SUFFIX)
+
+#define SD_HASHTABLE_APPEND "_sd1"
 #define SD_HASHTABLE_APPEND_LEN strlen(SD_HASHTABLE_APPEND)
 
-#define SD_ZSET_APPEND "}_sd2"
+#define SD_ZSET_APPEND "_sd2"
 #define SD_ZSET_APPEND_LEN strlen(SD_ZSET_APPEND)
 
 typedef RedisModuleCtx Ctx;

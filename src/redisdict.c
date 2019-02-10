@@ -1,20 +1,27 @@
 #include "../lib/redismodule.h"
 #include "redisdict.h"
 
-int rdictAppend(Ctx *ctx, RMSTR *str, const char *toAppend, size_t toAppendLen, RMSTR **res) {
+int rdictAppend(Ctx *ctx, RMSTR **str, const char *toAppend, size_t toAppendLen) {
     size_t nativeStrLen;
-    const char *nativeStr = RedisModule_StringPtrLen(str, &nativeStrLen);
+    const char *nativeStr = RedisModule_StringPtrLen(*str, &nativeStrLen);
+
+    int bracketStart;
+    for (bracketStart = 0; bracketStart < nativeStrLen; bracketStart++) {
+        if (nativeStr[bracketStart] == '{') break;
+    }
+
+    if (bracketStart < nativeStrLen) {
+        return RedisModule_StringAppendBuffer(ctx, *str, toAppend, toAppendLen);
+    }
 
     RMSTR *prefixStr = RedisModule_CreateString(ctx, SD_PREFIX, SD_PREFIX_LEN);
-    if (RedisModule_StringAppendBuffer(ctx, prefixStr, nativeStr, nativeStrLen) == ERR) {
+    if (RedisModule_StringAppendBuffer(ctx, prefixStr, nativeStr, nativeStrLen) == ERR ||
+        RedisModule_StringAppendBuffer(ctx, prefixStr, SD_SUFFIX, SD_SUFFIX_LEN) == ERR ||
+        RedisModule_StringAppendBuffer(ctx, prefixStr, toAppend, toAppendLen) == ERR) {
         return ERR;
     }
 
-    if (RedisModule_StringAppendBuffer(ctx, prefixStr, toAppend, toAppendLen) == ERR) {
-        return ERR;
-    }
-
-    *res = prefixStr;
+    *str = prefixStr;
     return OK;
 }
 
@@ -25,8 +32,8 @@ int rdictRange(Ctx *ctx, RMSTR **argv, int argc, int reverse) {
     RMSTR *hashStr = argv[1];
     RMSTR *zsetStr = RedisModule_CreateStringFromString(ctx, hashStr);
 
-    if (rdictAppend(ctx, hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN, &hashStr) == ERR ||
-    rdictAppend(ctx, zsetStr, SD_ZSET_APPEND, SD_ZSET_APPEND_LEN, &zsetStr) == ERR) {
+    if (rdictAppend(ctx, &hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN) == ERR ||
+        rdictAppend(ctx, &zsetStr, SD_ZSET_APPEND, SD_ZSET_APPEND_LEN) == ERR) {
         RedisModule_ReplyWithError(ctx, "Could not append to key");
         return ERR;
     }
@@ -64,8 +71,8 @@ int RDICT_SDSET(Ctx *ctx, RMSTR **argv, int argc) {
     RMSTR *hashStr = argv[1];
     RMSTR *zsetStr = RedisModule_CreateStringFromString(ctx, hashStr);
 
-    if (rdictAppend(ctx, hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN, &hashStr) == ERR || 
-    rdictAppend(ctx, zsetStr, SD_ZSET_APPEND, SD_ZSET_APPEND_LEN, &zsetStr) == ERR) {
+    if (rdictAppend(ctx, &hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN) == ERR || 
+        rdictAppend(ctx, &zsetStr, SD_ZSET_APPEND, SD_ZSET_APPEND_LEN) == ERR) {
         RedisModule_ReplyWithError(ctx, "Could not append to key");
         return ERR;
     }
@@ -75,7 +82,7 @@ int RDICT_SDSET(Ctx *ctx, RMSTR **argv, int argc) {
         double score;
         if (RedisModule_StringToDouble(argv[2], &score) == ERR) {
             RedisModule_HashSet(hashKey, REDISMODULE_HASH_NONE, argv[2], REDISMODULE_HASH_DELETE, NULL);
-            RedisModule_ReplyWithArray(ctx, "Key must be a number");
+            RedisModule_ReplyWithError(ctx, "Key must be a number");
             return ERR;
         }
 
@@ -91,40 +98,121 @@ int RDICT_SDSET(Ctx *ctx, RMSTR **argv, int argc) {
 }
 
 /**
- * rdict.sddel {NAME} {KEY}
- * Deletes a key in a sorted dictionary
- * Key must be a double number
+ * rdict.sdmset {NAME} {KEY} {VALUE} {KEY2} {VALUE2} ...
+ * Sets pairs of KV in a sorted dictionary
+ * Keys must be double numbers
  */
-int RDICT_SDDEL(Ctx *ctx, RMSTR **argv, int argc) {
+int RDICT_SDMSET(Ctx *ctx, RMSTR **argv, int argc) {
     AUTO(ctx);
-    if (argc != 3) return RedisModule_WrongArity(ctx);
+    if (argc < 4 || argc % 2 != 0) return RedisModule_WrongArity(ctx);
 
     RMSTR *hashStr = argv[1];
     RMSTR *zsetStr = RedisModule_CreateStringFromString(ctx, hashStr);
 
-    if (rdictAppend(ctx, hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN, &hashStr) == ERR ||
-    rdictAppend(ctx, zsetStr, SD_ZSET_APPEND, SD_ZSET_APPEND_LEN, &zsetStr) == ERR) {
-        RedisModule_ReplyWithError(ctx, "COuld not append to key");
+    if (rdictAppend(ctx, &hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN) == ERR || 
+        rdictAppend(ctx, &zsetStr, SD_ZSET_APPEND, SD_ZSET_APPEND_LEN) == ERR) {
+        RedisModule_ReplyWithError(ctx, "Could not append to key");
         return ERR;
     }
 
     RedisModuleKey *hashKey = RedisModule_OpenKey(ctx, hashStr, REDISMODULE_WRITE);
-    if (RedisModule_HashSet(hashKey, REDISMODULE_HASH_NONE, argv[2], REDISMODULE_HASH_DELETE, NULL) != 0) {
-        size_t hashLen = RedisModule_ValueLength(hashKey);
+    RedisModuleKey *zsetKey = NULL;
+
+    size_t count = 0;
+    int pos;
+    for(pos = 2; pos < argc; pos += 2) {
+        double score;
+        if (RedisModule_HashSet(hashKey, REDISMODULE_HASH_NONE, argv[pos], argv[pos + 1], NULL) == 0 &&
+            RedisModule_StringToDouble(argv[pos], &score) != ERR) {
+            if (zsetKey == NULL) {
+                zsetKey = RedisModule_OpenKey(ctx, zsetStr, REDISMODULE_WRITE);
+            }
+
+            RedisModule_ZsetAdd(zsetKey, score, argv[pos], NULL);
+            count++;
+        }
+    }
+
+    RedisModule_ReplyWithLongLong(ctx, count);
+
+    return OK;
+}
+
+/**
+ * rdict.sddel {NAME} {KEY} {KEY2} ...
+ * Deletes keys in a sorted dictionary
+ * Key must be a double number
+ */
+int RDICT_SDDEL(Ctx *ctx, RMSTR **argv, int argc) {
+    AUTO(ctx);
+    if (argc < 3) return RedisModule_WrongArity(ctx);
+
+    RMSTR *hashStr = argv[1];
+    RMSTR *zsetStr = RedisModule_CreateStringFromString(ctx, hashStr);
+
+    if (rdictAppend(ctx, &hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN) == ERR ||
+        rdictAppend(ctx, &zsetStr, SD_ZSET_APPEND, SD_ZSET_APPEND_LEN) == ERR) {
+        RedisModule_ReplyWithError(ctx, "Could not append to key");
+        return ERR;
+    }
+
+    RedisModuleKey *hashKey = RedisModule_OpenKey(ctx, hashStr, REDISMODULE_WRITE);
+    RedisModuleKey *zsetKey = NULL;
+
+    size_t count = 0;
+    int pos;
+    for (pos = 2; pos < argc; pos++) {
+        if (RedisModule_HashSet(hashKey, REDISMODULE_HASH_NONE, argv[pos], REDISMODULE_HASH_DELETE, NULL) != 0) {
+            size_t hashLen = RedisModule_ValueLength(hashKey);
+            if (zsetKey == NULL) {
+                zsetKey = RedisModule_OpenKey(ctx, zsetStr, REDISMODULE_WRITE);
+            }
+
+            if (hashLen == 0) {
+                RedisModule_DeleteKey(zsetKey);
+            }
+            else {
+                RedisModule_ZsetRem(zsetKey, argv[pos], NULL);
+            }
+
+            count++;
+        }
+    }
+
+    RedisModule_ReplyWithLongLong(ctx, count);
+
+    return OK;
+}
+
+/**
+ * rdict.sdadel {NAME} {NAME2} ...
+ * Deletes sorted dictionaries
+ */
+int RDICT_SDADEL(Ctx *ctx, RMSTR **argv, int argc) {
+    AUTO(ctx);
+    if (argc < 2) return RedisModule_WrongArity(ctx);
+
+    size_t count = 0;
+    int pos;
+    for (pos = 1; pos < argc; pos++) {
+        RMSTR *hashStr = argv[pos];
+        RMSTR *zsetStr = RedisModule_CreateStringFromString(ctx, hashStr);
+
+        if (rdictAppend(ctx, &hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN) == ERR ||
+            rdictAppend(ctx, &zsetStr, SD_ZSET_APPEND, SD_ZSET_APPEND_LEN) == ERR) {
+            continue;
+        }
+
+        RedisModuleKey *hashKey = RedisModule_OpenKey(ctx, hashStr, REDISMODULE_WRITE);
+        if (RedisModule_ValueLength(hashKey) == 0 || RedisModule_DeleteKey(hashKey) == ERR) continue;
+
         RedisModuleKey *zsetKey = RedisModule_OpenKey(ctx, zsetStr, REDISMODULE_WRITE);
-
-        if (hashLen == 0) {
-            RedisModule_DeleteKey(zsetKey);
-        }
-        else {
-            RedisModule_ZsetRem(zsetKey, argv[2], NULL);
-        }
-
-        RedisModule_ReplyWithLongLong(ctx, 1);
+        RedisModule_DeleteKey(zsetKey);
+        
+        count++;
     }
-    else {
-        RedisModule_ReplyWithLongLong(ctx, 0);
-    }
+
+    RedisModule_ReplyWithLongLong(ctx, count);
 
     return OK;
 }
@@ -139,7 +227,7 @@ int RDICT_SDGET(Ctx *ctx, RMSTR **argv, int argc) {
     if (argc != 3) return RedisModule_WrongArity(ctx);
 
     RMSTR *hashStr = argv[1];
-    if (rdictAppend(ctx, hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN, &hashStr) == ERR) {
+    if (rdictAppend(ctx, &hashStr, SD_HASHTABLE_APPEND, SD_HASHTABLE_APPEND_LEN) == ERR) {
         RedisModule_ReplyWithError(ctx, "Could not append to key");
         return ERR;
     }
@@ -190,7 +278,15 @@ int RedisModule_OnLoad(Ctx *ctx, RMSTR **argv, int argc) {
         return ERR;
     }
 
+    if (CreateCMD(ctx, "rdict.sdmset", RDICT_SDMSET, "write", 1, 1, 1) == ERR) {
+        return ERR;
+    }
+
     if (CreateCMD(ctx, "rdict.sddel", RDICT_SDDEL, "write", 1, 1, 1) == ERR) {
+        return ERR;
+    }
+
+    if (CreateCMD(ctx, "rdict.sdadel", RDICT_SDADEL, "write", 1, 1, 1) == ERR) {
         return ERR;
     }
 
